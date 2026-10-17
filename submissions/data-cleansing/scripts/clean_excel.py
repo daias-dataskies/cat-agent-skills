@@ -121,6 +121,14 @@ def free_name(base: str, existing) -> str:
     return cand
 
 
+def above_rows_frame(above_raw: pd.DataFrame, reason_col: str, row_col: str) -> pd.DataFrame:
+    """Rows found above the header, laid out like a Rejected sheet (source row + reason + original values)."""
+    out = above_raw.apply(lambda c: c.map(strip_illegal))
+    out.insert(0, reason_col, "Row above the header (title/note) - not part of the data table")
+    out.insert(0, row_col, out.index)
+    return out
+
+
 def unique_sheet_name(name: str, used: set) -> str:
     base = re.sub(r"[\\/*?:\[\]]", "_", name)[:31] or "Sheet"
     cand, i = base, 2
@@ -182,7 +190,7 @@ def clean_sheet(name: str, raw: pd.DataFrame, opts) -> dict | None:
 
     names, auto = [], []
     for j, v in enumerate(cleaned.loc[header_idx]):
-        if v is None:
+        if isnull(v):  # pandas may hand back NaN rather than None for an empty header cell
             names.append(f"Column_{j + 1}")
             auto.append(True)
         else:
@@ -199,7 +207,6 @@ def clean_sheet(name: str, raw: pd.DataFrame, opts) -> dict | None:
             taken.add(names[j])
             note(n, "Renamed duplicate column header", 1, f"{n} -> {names[j]}")
 
-    keep_pos = list(range(len(names)))
     body = cleaned.loc[header_idx + 1:].copy()
     raw_body = raw.loc[header_idx + 1:].copy()
     body.columns = raw_body.columns = names
@@ -235,13 +242,19 @@ def clean_sheet(name: str, raw: pd.DataFrame, opts) -> dict | None:
     if drop_cols:
         note("(sheet)", "Removed empty unnamed columns", len(drop_cols))
         body, raw_body = body.drop(columns=drop_cols), raw_body.drop(columns=drop_cols)
-        above_raw = above_raw.drop(columns=drop_cols)
     cols = list(body.columns)
+    # above_raw keeps every column (even ones empty below the header) so no note above the table is lost
+    all_cols = list(dict.fromkeys(cols + list(above_raw.columns)))
+    reason_col = free_name("Reason", all_cols)
+    row_col = free_name("Source Row", all_cols + [reason_col])
 
     if body.empty:
         warns.append(f"[{name}] has a header but no data rows.")
-        return {"name": name, "clean": body, "rejected": pd.DataFrame(), "log": log, "warns": warns,
-                "fmt": {}, "stats": dict(rows_in=0, blank=n_blank, above=0, kept=0, invalid=0, incomplete=0, duplicate=0)}
+        rejected = pd.DataFrame()
+        if len(above_raw):
+            rejected = above_rows_frame(above_raw, reason_col, row_col)
+        return {"name": name, "clean": body, "rejected": rejected, "log": log, "warns": warns, "fmt": {},
+                "stats": dict(rows_in=0, blank=n_blank, above=len(above_raw), kept=0, invalid=0, incomplete=0, duplicate=0)}
 
     rej: dict = {}  # excel row -> [(tag, text)]
 
@@ -429,15 +442,10 @@ def clean_sheet(name: str, raw: pd.DataFrame, opts) -> dict | None:
     bad = clean.index.isin(list(rej))
     kept = clean[~bad]
     rejected = raw_body[bad].apply(lambda c: c.map(strip_illegal))
-    reason_col = free_name("Reason", cols)
-    row_col = free_name("Source Row", cols + [reason_col])
     rejected.insert(0, reason_col, [" | ".join(t for _, t in rej[i]) for i in rejected.index])
     rejected.insert(0, row_col, rejected.index)
     if len(above_raw):  # keep rows above the header visible instead of silently dropping them
-        above_out = above_raw.apply(lambda c: c.map(strip_illegal))
-        above_out.insert(0, reason_col, "Row above the header (title/note) - not part of the data table")
-        above_out.insert(0, row_col, above_out.index)
-        rejected = pd.concat([above_out, rejected]).sort_values(row_col)
+        rejected = pd.concat([above_rows_frame(above_raw, reason_col, row_col), rejected]).sort_values(row_col)
 
     tags = Counter(rej[i][0][0] for i in rej)
     miss_cols = {c: int(kept[c].isna().sum()) for c in cols if kept[c].isna().any()}
