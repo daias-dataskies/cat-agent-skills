@@ -29,9 +29,9 @@ A workbook with four kinds of sheet:
 | *sheet* Rejected | Quarantined rows with their original values, source row number and reason |
 | Change Log | Every automatic fix with a count and an example |
 
-**Fixed automatically:** whitespace and hidden characters, placeholders (`N/A`, `-`, `#N/A`) to empty, title rows above the header, blank rows/columns, text to real numbers (`$1,200.50`, `(200)`, `12%`) and real dates, lower-cased emails, consistent capitalisation in category columns. ID-like columns (IDs, zip, phone, SKU) stay as text so leading zeros survive.
+**Fixed automatically:** whitespace and hidden characters, placeholders (`N/A`, `-`, `#N/A`) to empty, blank rows/columns, text to real numbers (`$1,200.50`, `(200)`, `12%`) and real dates (timezone-aware timestamps are stored as UTC without a timezone), lower-cased emails, consistent capitalisation in category columns. ID-like columns (IDs, zip, phone, SKU) and any value with 16+ digits stay as text so leading zeros and long reference numbers survive.
 
-**Quarantined, never silently deleted:** invalid dates/numbers/emails, rows missing required fields or mostly empty, exact duplicates and repeated key values.
+**Quarantined, never silently deleted:** invalid dates/numbers/emails, rows missing required fields or mostly empty, exact duplicates and repeated key values (a blank key is never counted as a duplicate). Title or note rows above the header are moved to the Rejected sheet too; if the automatic header detection picks the wrong row, the Summary says so and the skill can re-run with an explicit header row.
 
 **Flagged only:** extreme outliers, columns mixing numbers and text, ambiguous dates, blanks left in place. Missing values are never guessed.
 

@@ -36,6 +36,7 @@ NULL_TOKENS = {"", "n/a", "nan", "null", "nil", "-", "--", "(blank)"} | ERROR_TO
 
 NUM_RE = re.compile(r"^[-+]?(\d+\.?\d*|\.\d+)([eE][-+]?\d+)?$")
 THOUSANDS_RE = re.compile(r"^[-+]?\d{1,3}(,\d{3})+(\.\d+)?$")
+LONG_INT_RE = re.compile(r"^[-+]?\d{16,}$")
 ID_NAME_RE = re.compile(
     r"(^|[^a-z])(id|zip|postal|postcode|phone|tel|fax|sku|code|ssn|sin|account|acct|number|no|num)([^a-z]|$)",
     re.I,
@@ -168,8 +169,16 @@ def clean_sheet(name: str, raw: pd.DataFrame, opts) -> dict | None:
     window = nn.iloc[:20]
     thr = max(1, math.ceil(0.6 * window.max()))
     header_idx = window.index[int((window.values >= thr).argmax())]
-    above = int((nn.loc[:header_idx - 1] > 0).sum()) if header_idx > raw.index[0] else 0
-    note("(sheet)", "Removed title/note rows above the header", above)
+    if opts.header_row:
+        if opts.header_row in nn.index and nn.loc[opts.header_row] > 0:
+            header_idx = opts.header_row
+        else:
+            warns.append(f"[{name}] --header-row {opts.header_row} is empty or outside the sheet - header was auto-detected instead.")
+    above_idx = list(nn.index[(nn.index < header_idx) & (nn > 0)])
+    note("(sheet)", "Moved title/note rows above the header to the Rejected sheet", len(above_idx))
+    if any(nn.loc[i] >= 2 for i in above_idx):  # a multi-cell row could be a sparse header, not a title
+        warns.append(f"[{name}] header was taken from row {header_idx}; row(s) {', '.join(map(str, above_idx))} above it "
+                     "were moved to the Rejected sheet. If the real header is higher up, re-run with --header-row N.")
 
     names, auto = [], []
     for j, v in enumerate(cleaned.loc[header_idx]):
@@ -194,6 +203,8 @@ def clean_sheet(name: str, raw: pd.DataFrame, opts) -> dict | None:
     body = cleaned.loc[header_idx + 1:].copy()
     raw_body = raw.loc[header_idx + 1:].copy()
     body.columns = raw_body.columns = names
+    above_raw = raw.loc[above_idx].copy()
+    above_raw.columns = names
 
     # --- record the cell-level text fixes (compare raw vs cleaned)
     for col in names:
@@ -224,12 +235,13 @@ def clean_sheet(name: str, raw: pd.DataFrame, opts) -> dict | None:
     if drop_cols:
         note("(sheet)", "Removed empty unnamed columns", len(drop_cols))
         body, raw_body = body.drop(columns=drop_cols), raw_body.drop(columns=drop_cols)
+        above_raw = above_raw.drop(columns=drop_cols)
     cols = list(body.columns)
 
     if body.empty:
         warns.append(f"[{name}] has a header but no data rows.")
         return {"name": name, "clean": body, "rejected": pd.DataFrame(), "log": log, "warns": warns,
-                "fmt": {}, "stats": dict(rows_in=0, blank=n_blank, kept=0, invalid=0, incomplete=0, duplicate=0)}
+                "fmt": {}, "stats": dict(rows_in=0, blank=n_blank, above=0, kept=0, invalid=0, incomplete=0, duplicate=0)}
 
     rej: dict = {}  # excel row -> [(tag, text)]
 
@@ -250,6 +262,15 @@ def clean_sheet(name: str, raw: pd.DataFrame, opts) -> dict | None:
             isinstance(v, str) and len(v) > 1 and v[0] == "0" and v.isdigit() for v in nonnull
         )
         is_email = "email" in col.casefold().replace("-", "")
+        # 16+ digit integers (card/account/reference numbers) lose precision as floats and could merge distinct records
+        long_ints = [
+            v for v in nonnull
+            if (isinstance(v, int) and not isinstance(v, bool) and abs(v) >= 10**15)
+            or (isinstance(v, str) and LONG_INT_RE.match(re.sub(r"[,\s$€£¥]", "", v)))
+        ]
+        if long_ints and not is_email:
+            id_like = True
+            warns.append(f"[{name}] '{col}': {len(long_ints)} value(s) have 16+ digits - kept as text so no precision is lost.")
 
         if is_email:
             out = s.map(lambda v: v.casefold() if isinstance(v, str) else v)
@@ -396,8 +417,13 @@ def clean_sheet(name: str, raw: pd.DataFrame, opts) -> dict | None:
     if missing_keys:  # a partial composite key would wrongly merge distinct records, so skip entirely
         warns.append(f"[{name}] key column(s) {', '.join(repr(k) for k in missing_keys)} not found - "
                      "key-duplicate check was skipped for this sheet.")
-    else:
-        flag_dups(clean.drop(index=list(rej)), key_cols, "duplicate", f"Duplicate key ({', '.join(key_cols)})")
+    elif key_cols:
+        live = clean.drop(index=list(rej))
+        has_key = live[key_cols].notna().all(axis=1)  # a blank key is "unknown", not a match for other blanks
+        if (~has_key).any():
+            warns.append(f"[{name}] {int((~has_key).sum())} row(s) have a blank key ({', '.join(key_cols)}) and were not "
+                         "checked for key duplicates - consider making the key required.")
+        flag_dups(live[has_key], key_cols, "duplicate", f"Duplicate key ({', '.join(key_cols)})")
 
     # --- split kept / rejected
     bad = clean.index.isin(list(rej))
@@ -407,6 +433,11 @@ def clean_sheet(name: str, raw: pd.DataFrame, opts) -> dict | None:
     row_col = free_name("Source Row", cols + [reason_col])
     rejected.insert(0, reason_col, [" | ".join(t for _, t in rej[i]) for i in rejected.index])
     rejected.insert(0, row_col, rejected.index)
+    if len(above_raw):  # keep rows above the header visible instead of silently dropping them
+        above_out = above_raw.apply(lambda c: c.map(strip_illegal))
+        above_out.insert(0, reason_col, "Row above the header (title/note) - not part of the data table")
+        above_out.insert(0, row_col, above_out.index)
+        rejected = pd.concat([above_out, rejected]).sort_values(row_col)
 
     tags = Counter(rej[i][0][0] for i in rej)
     miss_cols = {c: int(kept[c].isna().sum()) for c in cols if kept[c].isna().any()}
@@ -416,7 +447,7 @@ def clean_sheet(name: str, raw: pd.DataFrame, opts) -> dict | None:
 
     return {
         "name": name, "clean": kept, "rejected": rejected, "log": log, "warns": warns, "fmt": fmt,
-        "stats": dict(rows_in=len(body), blank=n_blank, kept=len(kept), invalid=tags["invalid"],
+        "stats": dict(rows_in=len(body), blank=n_blank, above=len(above_raw), kept=len(kept), invalid=tags["invalid"],
                       incomplete=tags["incomplete"], duplicate=tags["duplicate"]),
     }
 
@@ -478,13 +509,13 @@ def write_workbook(out_path: Path, results: list, src_name: str) -> None:
         ws.append([f"Data cleansing summary - {src_name}"])
         ws["A1"].font = Font(bold=True, size=14)
         ws.append([])
-        ws.append(["Sheet", "Data rows read", "Blank rows removed", "Rows kept",
+        ws.append(["Sheet", "Data rows read", "Blank rows removed", "Rows above header (moved to Rejected)", "Rows kept",
                    "Quarantined: invalid", "Quarantined: incomplete", "Quarantined: duplicate"])
         for c in ws[3]:
             c.font = Font(bold=True)
         for r in results:
             s = r["stats"]
-            ws.append([sheet_names[r["name"]], s["rows_in"], s["blank"], s["kept"],
+            ws.append([sheet_names[r["name"]], s["rows_in"], s["blank"], s["above"], s["kept"],
                        s["invalid"], s["incomplete"], s["duplicate"]])
         warns = [w for r in results for w in r["warns"]]
         ws.append([])
@@ -496,7 +527,7 @@ def write_workbook(out_path: Path, results: list, src_name: str) -> None:
         ws.append(["Quarantined rows are on the '<sheet> Rejected' sheets with the reason; nothing was silently deleted."])
         literalise(ws)
         ws.column_dimensions["A"].width = 38
-        for col in "BCDEFG":
+        for col in "BCDEFGH":
             ws.column_dimensions[col].width = 22
 
 
@@ -588,6 +619,7 @@ def main() -> int:
     ap.add_argument("--recursive", action="store_true", help="Search folders recursively")
     ap.add_argument("--key", nargs="+", metavar="COL", help="Column(s) that uniquely identify a record; later repeats are quarantined")
     ap.add_argument("--required", nargs="+", metavar="COL", help="Column(s) that must be filled; rows missing them are quarantined")
+    ap.add_argument("--header-row", type=int, metavar="N", help="Excel row number of the header (default: auto-detect); applies to every sheet")
     ap.add_argument("--min-filled", type=float, default=0.5, help="Quarantine rows with a smaller share of core fields filled (default 0.5)")
     ap.add_argument("--dayfirst", action="store_true", help="Read ambiguous dates as DD/MM/YYYY (default MM/DD/YYYY)")
     opts = ap.parse_args()

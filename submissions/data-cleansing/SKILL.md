@@ -24,8 +24,10 @@ If the user said "just clean it", don't ask - run with defaults, then report the
 ## Step 3: Run the script
 
 ```
-python scripts/clean_excel.py <folder-or-files> [--out-dir DIR] [--key COL ...] [--required COL ...] [--min-filled 0.5] [--dayfirst] [--recursive]
+python scripts/clean_excel.py <folder-or-files> [--out-dir DIR] [--key COL ...] [--required COL ...] [--min-filled 0.5] [--dayfirst] [--header-row N] [--recursive]
 ```
+
+`--key` takes the columns of **one** composite key (all must exist on a sheet, otherwise the key check is skipped for that sheet). `--header-row N` forces the header to Excel row N on every sheet; use it only when the automatic detection picked the wrong row (see the `REVIEW:` line about the header).
 
 ```
 # Defaults, everything in the working folder
@@ -42,14 +44,14 @@ Column names are matched case-insensitively. Each input produces `<original name
 **Fixes automatically (safe, reversible, logged):**
 - Trims and collapses whitespace; removes hidden characters (non-breaking spaces, zero-width, control characters).
 - Turns placeholders (`N/A`, `null`, `nil`, `-`, `--`, `(blank)`) and Excel errors (`#N/A`, `#DIV/0!`, ...) into truly empty cells.
-- Finds the real header row (skips title lines above the table); renames blank/duplicate headers; drops blank rows and empty unnamed columns.
-- Converts text to real numbers (`$1,200.50`, `(200)`, `12%`) and real Excel dates (`yyyy-mm-dd`). Identifier-like columns (ID, zip, phone, SKU, account, code, anything with leading zeros) are kept as text so `00123` is not damaged.
+- Finds the real header row; any rows above it (titles, notes) are moved to the Rejected sheet, not deleted. Renames blank/duplicate headers; drops blank rows and empty unnamed columns.
+- Converts text to real numbers (`$1,200.50`, `(200)`, `12%`) and real Excel dates (`yyyy-mm-dd`; timezone-aware timestamps become UTC without a timezone). Identifier-like columns (ID, zip, phone, SKU, account, code, anything with leading zeros) and any value with 16+ digits are kept as text so `00123` or a long reference number is not damaged.
 - Lower-cases emails; makes inconsistent capitalisation consistent in category-style columns (`usa` / `USA`).
 
 **Quarantines (moved to the `<sheet> Rejected` sheet with source row and reason, never silently deleted):**
 - *Invalid*: unparseable or implausible dates, non-numeric values in a numeric column, malformed emails.
 - *Incomplete*: missing a `--required` field, or fewer than `--min-filled` (default 50%) of the sheet's core columns filled.
-- *Duplicate*: exact duplicate rows, and later repeats of a `--key` value. The first occurrence is kept.
+- *Duplicate*: exact duplicate rows, and later repeats of a `--key` value. The first occurrence is kept. Rows with a blank key value are never treated as duplicates of each other; they are reported instead.
 
 **Flags only (kept as-is, listed in the Summary sheet and console):** extreme numeric outliers, columns mixing numbers and text, ambiguous dates, empty cells left in kept rows. It never fills blanks with guessed values.
 
