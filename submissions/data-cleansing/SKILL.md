@@ -35,7 +35,7 @@ python scripts/clean_excel.py .
 python scripts/clean_excel.py sales.xlsx --key "Customer ID" --required Email Name --dayfirst
 ```
 
-Column names are matched case-insensitively. Each input produces `<original name>_cleaned.xlsx` next to it (the original is untouched; `.xlsm` macros are not carried over, output is always `.xlsx`).
+Column names are matched case-insensitively. Each input produces `<original name>_cleaned.xlsx` next to it; if two inputs in the same run would share that name (e.g. `sales.xlsx` and `sales.xlsm`), the later one is written as `<name>_2_cleaned.xlsx`, so check the `OUTPUT:` lines for the real file names (the original is untouched; `.xlsm` macros are not carried over, output is always `.xlsx`).
 
 ### What it does
 

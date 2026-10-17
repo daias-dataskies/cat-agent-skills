@@ -518,7 +518,20 @@ def find_files(paths, recursive: bool) -> list:
     )
 
 
-def process(path: Path, out_dir: Path | None, opts) -> bool:
+def output_path(path: Path, out_dir: Path | None, claimed: set) -> Path:
+    """<stem>_cleaned.xlsx, or <stem>_2_cleaned.xlsx ... if another input in this run already claimed that name.
+    Keeps the _cleaned.xlsx suffix so outputs are never picked up as inputs."""
+    folder, n = out_dir or path.parent, 1
+    while True:
+        stem = path.stem if n == 1 else f"{path.stem}_{n}"
+        cand = folder / f"{stem}_cleaned.xlsx"
+        if str(cand.resolve()).casefold() not in claimed:
+            claimed.add(str(cand.resolve()).casefold())
+            return cand
+        n += 1
+
+
+def process(path: Path, out_dir: Path | None, opts, claimed: set) -> bool:
     print(f"\n=== {path.name}")
     try:
         sheets = read_workbook(path)
@@ -545,7 +558,7 @@ def process(path: Path, out_dir: Path | None, opts) -> bool:
         print("ERROR: no sheets with data found.")
         return False
 
-    out_path = (out_dir or path.parent) / f"{path.stem}_cleaned.xlsx"
+    out_path = output_path(path, out_dir, claimed)
     try:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         write_workbook(out_path, results, path.name)
@@ -584,7 +597,8 @@ def main() -> int:
         print("No Excel files (.xlsx, .xlsm, .xls) found.")
         return 1
     print(f"Found {len(files)} Excel file(s).")
-    ok = [process(f, Path(opts.out_dir) if opts.out_dir else None, opts) for f in files]
+    claimed: set = set()
+    ok = [process(f, Path(opts.out_dir) if opts.out_dir else None, opts, claimed) for f in files]
     print(f"\nDone: {sum(ok)} of {len(ok)} file(s) cleaned.")
     return 0 if all(ok) else 1
 
