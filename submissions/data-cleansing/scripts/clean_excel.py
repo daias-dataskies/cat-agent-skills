@@ -29,7 +29,7 @@ warnings.filterwarnings("ignore")
 EXCEL_EXTS = {".xlsx", ".xlsm", ".xls"}
 
 CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
-INVISIBLE_RE = re.compile(r"[​‌‍⁠﻿]")
+INVISIBLE_RE = re.compile(r"[\u200b\u200c\u200d\u2060\ufeff]")
 WS_RE = re.compile(r"\s+")
 ERROR_TOKENS = {"#n/a", "#div/0!", "#value!", "#ref!", "#name?", "#null!", "#num!"}
 NULL_TOKENS = {"", "n/a", "nan", "null", "nil", "-", "--", "(blank)"} | ERROR_TOKENS
@@ -42,6 +42,8 @@ ID_NAME_RE = re.compile(
     re.I,
 )
 DATE_NAME_RE = re.compile(r"date|time|dob|birth|created|updated|modified|timestamp", re.I)
+# headings that contain an identifier word but hold quantities/amounts (e.g. "Number of Units", "Account Balance")
+QTY_NAME_RE = re.compile(r"number of|num of|no\.? of|# of|count|qty|quantity|units|amount|total|price|rate|balance|revenue|cost", re.I)
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 AMBIGUOUS_DATE_RE = re.compile(r"^\s*(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{2,4})\s*$")
 
@@ -79,7 +81,9 @@ def parse_number(v):
     pct = t.endswith("%")
     if pct:
         t = t[:-1].strip()
-    t = re.sub(r"[$€£¥\s]", "", t)
+    t = re.sub(r"[$\u20ac\u00a3\u00a5\s]", "", t)
+    if neg and t[:1] in "+-":
+        return None  # '(-200)' contradicts itself; flipping or ignoring the sign could reverse a balance, so leave it for review
     if "," in t:
         if not THOUSANDS_RE.match(t):
             return None  # e.g. "1,5" (decimal comma) - too risky to guess
@@ -271,15 +275,18 @@ def clean_sheet(name: str, raw: pd.DataFrame, opts) -> dict | None:
         if nonnull.empty:
             new_cols[col] = s
             continue
-        id_like = bool(ID_NAME_RE.search(col)) or any(
-            isinstance(v, str) and len(v) > 1 and v[0] == "0" and v.isdigit() for v in nonnull
-        )
+        # identifier columns stay text; a heading like "Account Created Date" or "Number of Units" is not one,
+        # and real Excel dates are never identifiers, so those go through date/number validation instead
+        mostly_dates = sum(isinstance(v, (datetime, date, pd.Timestamp)) for v in nonnull) >= 0.5 * len(nonnull)
+        id_like = (
+            bool(ID_NAME_RE.search(col)) and not DATE_NAME_RE.search(col) and not QTY_NAME_RE.search(col) and not mostly_dates
+        ) or any(isinstance(v, str) and len(v) > 1 and v[0] == "0" and v.isdigit() for v in nonnull)
         is_email = "email" in col.casefold().replace("-", "")
         # 16+ digit integers (card/account/reference numbers) lose precision as floats and could merge distinct records
         long_ints = [
             v for v in nonnull
             if (isinstance(v, int) and not isinstance(v, bool) and abs(v) >= 10**15)
-            or (isinstance(v, str) and LONG_INT_RE.match(re.sub(r"[,\s$€£¥]", "", v)))
+            or (isinstance(v, str) and LONG_INT_RE.match(re.sub(r"[,\s$\u20ac\u00a3\u00a5]", "", v)))
         ]
         if long_ints and not is_email:
             id_like = True
