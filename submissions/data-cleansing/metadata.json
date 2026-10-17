@@ -3,7 +3,7 @@
   "description": "Upload Excel files in chat and get back a cleaned workbook: messy text, numbers and dates fixed, and invalid, incomplete or duplicate rows quarantined with the reason and a full change log.",
   "platforms": ["Copilot Studio"],
   "tags": ["data", "excel", "data-cleansing", "data-quality", "duplicates", "spreadsheet"],
-  "author": "Jose Daias",
+  "author": "Daias Jose",
   "authorUrl": "https://github.com/daias-dataskies",
   "version": "1.0.0",
   "createdAt": "2026-10-17",
