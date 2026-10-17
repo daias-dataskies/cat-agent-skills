@@ -91,11 +91,16 @@ def parse_number(v):
     return (x / 100.0 if pct else x), pct
 
 
+TZ_RE = re.compile(r"(Z|[+-]\d{2}:?\d{2})\s*$")
+
+
 def parse_dates(strings: pd.Series, dayfirst: bool) -> pd.Series:
+    """Parse to timezone-naive timestamps. Timezone-aware values are converted to UTC, then made naive."""
     try:
-        return pd.to_datetime(strings, errors="coerce", format="mixed", dayfirst=dayfirst)
+        out = pd.to_datetime(strings, errors="coerce", format="mixed", dayfirst=dayfirst, utc=True)
     except (TypeError, ValueError):
-        return pd.to_datetime(strings, errors="coerce", dayfirst=dayfirst)
+        out = pd.to_datetime(strings, errors="coerce", dayfirst=dayfirst, utc=True)
+    return out.dt.tz_localize(None)
 
 
 def strip_illegal(v):
@@ -105,6 +110,14 @@ def strip_illegal(v):
 def short(v, n=60) -> str:
     s = repr(v) if isinstance(v, str) else str(v)
     return s if len(s) <= n else s[: n - 3] + "..."
+
+
+def free_name(base: str, existing) -> str:
+    """base, or 'base (2)', 'base (3)'... - whichever is not already a column name."""
+    taken, cand, i = set(existing), base, 2
+    while cand in taken:
+        cand, i = f"{base} ({i})", i + 1
+    return cand
 
 
 def unique_sheet_name(name: str, used: set) -> str:
@@ -166,11 +179,15 @@ def clean_sheet(name: str, raw: pd.DataFrame, opts) -> dict | None:
         else:
             names.append(str(int(v)) if isinstance(v, float) and v.is_integer() else str(v))
             auto.append(False)
-    seen = Counter()
-    for j, n in enumerate(names):
+    seen, taken = Counter(), set(names)  # reserve every existing header so suffixes never collide
+    for j, n in enumerate(list(names)):
         seen[n] += 1
         if seen[n] > 1:
-            names[j] = f"{n}_{seen[n]}"
+            k = seen[n]
+            while f"{n}_{k}" in taken:
+                k += 1
+            names[j] = f"{n}_{k}"
+            taken.add(names[j])
             note(n, "Renamed duplicate column header", 1, f"{n} -> {names[j]}")
 
     keep_pos = list(range(len(names)))
@@ -269,7 +286,8 @@ def clean_sheet(name: str, raw: pd.DataFrame, opts) -> dict | None:
                     converted += 1
                     ex = ex or f"{short(v)} -> {x:g}"
             ser = pd.Series(vals, index=s.index, dtype="float64")
-            if not any_pct and ser.dropna().map(float.is_integer).all():
+            # Int64 only when every value is a whole number that fits exactly (|x| < 2**53); else keep float
+            if not any_pct and ser.dropna().map(float.is_integer).all() and ser.abs().max() < 2**53:
                 ser = ser.astype("Int64")
             new_cols[col] = ser
             if any_pct:
@@ -295,6 +313,8 @@ def clean_sheet(name: str, raw: pd.DataFrame, opts) -> dict | None:
             for idx, v in nonnull.items():
                 if is_dt[idx]:
                     ts = pd.Timestamp(v)
+                    if ts.tzinfo is not None:
+                        ts = ts.tz_convert("UTC").tz_localize(None)
                 elif idx in parsed_dt.index and not pd.isna(parsed_dt[idx]):
                     ts = parsed_dt[idx]
                     converted += 1
@@ -311,6 +331,9 @@ def clean_sheet(name: str, raw: pd.DataFrame, opts) -> dict | None:
             fmt[col] = "yyyy-mm-dd hh:mm:ss" if has_time else "yyyy-mm-dd"
             new_cols[col] = ser
             note(col, "Converted text to real Excel dates", converted, ex)
+            n_tz = sum(1 for v in strs if ":" in v and TZ_RE.search(v))
+            if n_tz:
+                warns.append(f"[{name}] '{col}': {n_tz} timestamp(s) carried a timezone; converted to UTC and stored without one.")
             amb = [m for v in strs if (m := AMBIGUOUS_DATE_RE.match(v)) and int(m[1]) <= 12 and int(m[2]) <= 12 and m[1] != m[2]]
             if amb:
                 order = "day-first" if opts.dayfirst else "month-first"
@@ -368,20 +391,22 @@ def clean_sheet(name: str, raw: pd.DataFrame, opts) -> dict | None:
             reject(idx, tag, f"{label} (first seen on row {first[idx]})")
 
     flag_dups(clean.drop(index=list(rej)), cols, "duplicate", "Exact duplicate row")
-    key_cols = []
-    for k in opts.key or []:
-        if k.casefold() in lower_to_col:
-            key_cols.append(lower_to_col[k.casefold()])
-        else:
-            warns.append(f"[{name}] key column '{k}' not found - key-duplicate check was skipped for this sheet.")
-    flag_dups(clean.drop(index=list(rej)), key_cols, "duplicate", f"Duplicate key ({', '.join(key_cols)})")
+    key_cols = [lower_to_col[k.casefold()] for k in opts.key or [] if k.casefold() in lower_to_col]
+    missing_keys = [k for k in opts.key or [] if k.casefold() not in lower_to_col]
+    if missing_keys:  # a partial composite key would wrongly merge distinct records, so skip entirely
+        warns.append(f"[{name}] key column(s) {', '.join(repr(k) for k in missing_keys)} not found - "
+                     "key-duplicate check was skipped for this sheet.")
+    else:
+        flag_dups(clean.drop(index=list(rej)), key_cols, "duplicate", f"Duplicate key ({', '.join(key_cols)})")
 
     # --- split kept / rejected
     bad = clean.index.isin(list(rej))
     kept = clean[~bad]
     rejected = raw_body[bad].apply(lambda c: c.map(strip_illegal))
-    rejected.insert(0, "Reason", [" | ".join(t for _, t in rej[i]) for i in rejected.index])
-    rejected.insert(0, "Source Row", rejected.index)
+    reason_col = free_name("Reason", cols)
+    row_col = free_name("Source Row", cols + [reason_col])
+    rejected.insert(0, reason_col, [" | ".join(t for _, t in rej[i]) for i in rejected.index])
+    rejected.insert(0, row_col, rejected.index)
 
     tags = Counter(rej[i][0][0] for i in rej)
     miss_cols = {c: int(kept[c].isna().sum()) for c in cols if kept[c].isna().any()}
@@ -397,10 +422,19 @@ def clean_sheet(name: str, raw: pd.DataFrame, opts) -> dict | None:
 
 
 # ---------------------------------------------------------------- writing
+def literalise(ws):
+    """Store text that starts with '=' as text. openpyxl would otherwise write it as a live formula."""
+    for row in ws.iter_rows():
+        for c in row:
+            if c.data_type == "f":
+                c.data_type = "s"
+
+
 def style_sheet(ws, df: pd.DataFrame, fmt: dict):
     from openpyxl.styles import Font, PatternFill
     from openpyxl.utils import get_column_letter
 
+    literalise(ws)
     for cell in ws[1]:
         cell.font = Font(bold=True, color="FFFFFF")
         cell.fill = PatternFill("solid", fgColor="305496")
@@ -460,6 +494,7 @@ def write_workbook(out_path: Path, results: list, src_name: str) -> None:
             ws.append([w])
         ws.append([])
         ws.append(["Quarantined rows are on the '<sheet> Rejected' sheets with the reason; nothing was silently deleted."])
+        literalise(ws)
         ws.column_dimensions["A"].width = 38
         for col in "BCDEFG":
             ws.column_dimensions[col].width = 22
@@ -494,9 +529,14 @@ def process(path: Path, out_dir: Path | None, opts) -> bool:
         print(f"ERROR: could not open file ({type(e).__name__}: {e}). It may be corrupt or password-protected.")
         return False
 
-    results = []
+    results, failed = [], False
     for name, raw in sheets.items():
-        res = clean_sheet(name, raw, opts)
+        try:
+            res = clean_sheet(name, raw, opts)
+        except Exception as e:  # one bad sheet must not stop the others
+            print(f"ERROR: [{name}] could not be cleaned and was left out ({type(e).__name__}: {e})")
+            failed = True
+            continue
         if res is None:
             print(f"  [{name}] empty sheet - skipped")
         else:
@@ -506,8 +546,12 @@ def process(path: Path, out_dir: Path | None, opts) -> bool:
         return False
 
     out_path = (out_dir or path.parent) / f"{path.stem}_cleaned.xlsx"
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    write_workbook(out_path, results, path.name)
+    try:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        write_workbook(out_path, results, path.name)
+    except Exception as e:
+        print(f"ERROR: could not write the cleaned file ({type(e).__name__}: {e})")
+        return False
 
     for r in results:
         s = r["stats"]
@@ -521,7 +565,7 @@ def process(path: Path, out_dir: Path | None, opts) -> bool:
         for w in r["warns"]:
             print(f"  REVIEW: {w}")
     print(f"OUTPUT: {out_path}")
-    return True
+    return not failed
 
 
 def main() -> int:

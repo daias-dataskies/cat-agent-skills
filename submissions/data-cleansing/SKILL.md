@@ -59,7 +59,7 @@ Column names are matched case-insensitively. Each input produces `<original name
 2. Give a short summary per file: rows read, rows kept, rows quarantined by reason (invalid / incomplete / duplicate), and the main fixes (counts from the console output).
 3. List every `REVIEW:` line from the output in plain language and ask the user to confirm or correct them (e.g. date order, mixed columns, which column is the key). Offer to re-run with different settings.
 4. Be explicit about assumptions: which column was used as the key, which date order was assumed.
-5. If the script prints `ERROR:` for a file (corrupt, password-protected, unsupported `.xls`), say which file and why, and ask the user to re-save it as an unprotected `.xlsx`. Don't try to repair it by hand.
+5. If the script prints `ERROR:` for a file (corrupt, password-protected, unsupported `.xls`), say which file and why, and ask the user to re-save it as an unprotected `.xlsx`. If the error names a single sheet, say that sheet was left out of the cleaned file while the others were cleaned. Don't try to repair anything by hand.
 
 ## Limits
 
