@@ -701,7 +701,7 @@ def main() -> int:
     ap.add_argument("--recursive", action="store_true", help="Search folders recursively")
     ap.add_argument("--key", nargs="+", metavar="COL", help="Column(s) that uniquely identify a record; later repeats are quarantined")
     ap.add_argument("--required", nargs="+", metavar="COL", help="Column(s) that must be filled; rows missing them are quarantined")
-    ap.add_argument("--header-row", nargs="+", metavar="N|SHEET=N",
+    ap.add_argument("--header-row", nargs="+", action="extend", metavar="N|SHEET=N",
                     help="Excel row number of the header: N for every sheet and/or SHEET=N for one sheet (default: auto-detect)")
     ap.add_argument("--min-filled", type=float, default=0.5, help="Quarantine rows with a smaller share of core fields filled (default 0.5)")
     ap.add_argument("--dayfirst", action="store_true", help="Read ambiguous dates as DD/MM/YYYY (default MM/DD/YYYY)")
