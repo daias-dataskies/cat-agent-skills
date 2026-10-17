@@ -174,7 +174,7 @@ def clean_sheet(name: str, raw: pd.DataFrame, opts) -> dict | None:
     nn = cleaned.notna().sum(axis=1)
     if nn.max() == 0:
         return None
-    window = nn.iloc[:20]
+    window = nn[nn > 0].iloc[:20]
     thr = max(1, math.ceil(0.6 * window.max()))
     header_idx = window.index[int((window.values >= thr).argmax())]
     if opts.header_row:
