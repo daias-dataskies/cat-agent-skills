@@ -24,10 +24,12 @@ If the user said "just clean it", don't ask - run with defaults, then report the
 ## Step 3: Run the script
 
 ```
-python scripts/clean_excel.py <folder-or-files> [--out-dir DIR] [--key COL ...] [--required COL ...] [--min-filled 0.5] [--dayfirst] [--header-row N] [--recursive]
+python scripts/clean_excel.py <folder-or-files> [--out-dir DIR] [--key COL ...] [--required COL ...] [--min-filled 0.5] [--dayfirst] [--header-row N|SHEET=N ...] [--recursive]
 ```
 
-`--key` takes the columns of **one** composite key (all must exist on a sheet, otherwise the key check is skipped for that sheet). `--header-row N` forces the header to Excel row N on every sheet; use it only when the automatic detection picked the wrong row (see the `REVIEW:` line about the header).
+Put the file or folder paths first, before any option that takes several values (`--key`, `--required`, `--header-row`).
+
+`--key` takes the columns of **one** composite key (all must exist on a sheet, otherwise the key check is skipped for that sheet). `--header-row` sets the header to an Excel row: `--header-row 3` for every sheet, or `--header-row "Sales=3"` for one sheet (repeat for more sheets). Use it only after the script reports that a sheet's header is ambiguous.
 
 ```
 # Defaults, everything in the working folder
@@ -44,7 +46,7 @@ Column names are matched case-insensitively. Each input produces `<original name
 **Fixes automatically (safe, reversible, logged):**
 - Trims and collapses whitespace; removes hidden characters (non-breaking spaces, zero-width, control characters).
 - Turns placeholders (`N/A`, `null`, `nil`, `-`, `--`, `(blank)`) and Excel errors (`#N/A`, `#DIV/0!`, ...) into truly empty cells.
-- Finds the real header row; any rows above it (titles, notes) are moved to the Rejected sheet, not deleted. Renames blank/duplicate headers; drops blank rows and empty unnamed columns.
+- Finds the real header row; any rows above it (titles, notes) are moved to the Rejected sheet, not deleted. If a row above holds several values, so it could be the real header, the sheet is not guessed: the script stops for that sheet and asks for the header row (see Step 4). Renames blank/duplicate headers; drops blank rows and empty unnamed columns.
 - Converts text to real numbers (`$1,200.50`, `(200)`, `12%`) and real Excel dates (`yyyy-mm-dd`; timezone-aware timestamps become UTC without a timezone). Identifier-like columns (ID, zip, phone, SKU, account, code, anything with leading zeros) and any value with 16+ digits are kept as text so `00123` or a long reference number is not damaged.
 - Lower-cases emails; makes inconsistent capitalisation consistent in category-style columns (`usa` / `USA`).
 
@@ -61,7 +63,7 @@ Column names are matched case-insensitively. Each input produces `<original name
 2. Give a short summary per file: rows read, rows kept, rows quarantined by reason (invalid / incomplete / duplicate), and the main fixes (counts from the console output).
 3. List every `REVIEW:` line from the output in plain language and ask the user to confirm or correct them (e.g. date order, mixed columns, which column is the key). Offer to re-run with different settings.
 4. Be explicit about assumptions: which column was used as the key, which date order was assumed.
-5. If the script prints `ERROR:` for a file (corrupt, password-protected, unsupported `.xls`), say which file and why, and ask the user to re-save it as an unprotected `.xlsx`. If the error names a single sheet, say that sheet was left out of the cleaned file while the others were cleaned. Don't try to repair anything by hand.
+5. If the script prints `ERROR:` for a file (corrupt, password-protected, unsupported `.xls`), say which file and why, and ask the user to re-save it as an unprotected `.xlsx`. If the error names a single sheet, say that sheet was left out of the cleaned file while the others were cleaned. If the error says a sheet's header row is ambiguous, show the user the rows it names, ask which row is the header, then re-run with `--header-row "<sheet>=N"`. Don't try to repair anything by hand.
 
 ## Limits
 

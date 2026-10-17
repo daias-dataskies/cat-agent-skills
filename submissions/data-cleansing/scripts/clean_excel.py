@@ -41,9 +41,19 @@ ID_NAME_RE = re.compile(
     r"(^|[^a-z])(id|zip|postal|postcode|phone|tel|fax|sku|code|ssn|sin|account|acct|number|no|num)([^a-z]|$)",
     re.I,
 )
-DATE_NAME_RE = re.compile(r"date|time|dob|birth|created|updated|modified|timestamp", re.I)
+# Heading hints are matched as whole words, never substrings ("Candidate ID" is not a date, "Account" is not a count).
+DATE_WORDS = {"date", "datetime", "time", "timestamp", "dob", "birth", "birthday", "created", "updated", "modified"}
 # headings that contain an identifier word but hold quantities/amounts (e.g. "Number of Units", "Account Balance")
-QTY_NAME_RE = re.compile(r"number of|num of|no\.? of|# of|count|qty|quantity|units|amount|total|price|rate|balance|revenue|cost", re.I)
+QTY_WORDS = {"qty", "quantity", "units", "amount", "total", "price", "rate", "balance", "revenue", "cost", "count"}
+QTY_PHRASE_RE = re.compile(r"\b(number|num|no)\.? of\b|#\s*of\b", re.I)
+# "Email Status", "Email Opt In" ... describe an address, they do not contain one
+NON_ADDRESS_WORDS = {"status", "opt", "optin", "optout", "verified", "valid", "validated", "flag", "sent", "bounced",
+                     "bounce", "consent", "subscribed", "subscription", "preference", "pref", "domain", "type",
+                     "source", "count", "date", "time", "reason", "enabled", "allowed", "confirmed", "marketing"}
+# optional sign and ONE currency symbol (leading or trailing); digits/commas/dot must be contiguous (no inner spaces)
+NUM_PARTS_RE = re.compile(
+    r"^(?P<s1>[-+]?)\s*(?P<cur1>[$\u20ac\u00a3\u00a5]?)\s*(?P<s2>[-+]?)(?P<num>[\d,.]+(?:[eE][-+]?\d+)?)\s*(?P<cur2>[$\u20ac\u00a3\u00a5]?)$"
+)
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 AMBIGUOUS_DATE_RE = re.compile(r"^\s*(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{2,4})\s*$")
 
@@ -71,7 +81,8 @@ def parse_number(v):
     if isinstance(v, (bool, np.bool_)):
         return None
     if isinstance(v, (int, float, np.integer, np.floating)):
-        return float(v), False
+        x = float(v)
+        return (x, False) if math.isfinite(x) else None
     if not isinstance(v, str):
         return None
     t = v.strip()
@@ -81,19 +92,60 @@ def parse_number(v):
     pct = t.endswith("%")
     if pct:
         t = t[:-1].strip()
-    t = re.sub(r"[$\u20ac\u00a3\u00a5\s]", "", t)
-    if neg and t[:1] in "+-":
+    m = NUM_PARTS_RE.match(t)
+    if not m or (m["s1"] and m["s2"]) or (m["cur1"] and m["cur2"]):
+        return None  # malformed, e.g. "1 2", "$1$2", "--5"
+    sign = m["s1"] or m["s2"]
+    if neg and sign:
         return None  # '(-200)' contradicts itself; flipping or ignoring the sign could reverse a balance, so leave it for review
-    if "," in t:
-        if not THOUSANDS_RE.match(t):
+    num = m["num"]
+    if "," in num:
+        if not THOUSANDS_RE.match(num):
             return None  # e.g. "1,5" (decimal comma) - too risky to guess
-        t = t.replace(",", "")
-    if not NUM_RE.match(t):
+        num = num.replace(",", "")
+    if not NUM_RE.match(num):
         return None
-    x = float(t)
+    x = float(sign + num)
+    if not math.isfinite(x):
+        return None  # "1e999" overflows to infinity, which would make distinct values compare equal
     if neg:
         x = -x
     return (x / 100.0 if pct else x), pct
+
+
+def name_tokens(col: str) -> list:
+    """Lower-case whole words of a heading, splitting camelCase and punctuation ('AccountCreatedDate' -> 3 words)."""
+    return re.findall(r"[a-z]+", re.sub(r"([a-z])([A-Z])", r"\1 \2", col).lower())
+
+
+def is_date_name(col: str) -> bool:
+    return bool(DATE_WORDS & set(name_tokens(col)))
+
+
+def is_qty_name(col: str) -> bool:
+    return bool(QTY_WORDS & set(name_tokens(col))) or bool(QTY_PHRASE_RE.search(col))
+
+
+def is_email_name(col: str) -> bool:
+    tokens = set(name_tokens(col))
+    return bool({"email", "emails", "mail"} & tokens) and not (NON_ADDRESS_WORDS & tokens)
+
+
+class HeaderReviewNeeded(Exception):
+    """The header row cannot be chosen safely; a person must confirm it."""
+
+
+def header_row_for(sheet: str, specs):
+    """--header-row accepts N (every sheet) and/or SHEET=N (one sheet); the sheet-specific value wins."""
+    default = None
+    for spec in specs or []:
+        if "=" in spec:
+            s, n = spec.rsplit("=", 1)
+            if s.strip().casefold() == sheet.casefold():
+                return int(n)
+        else:
+            default = int(spec)
+    return default
 
 
 TZ_RE = re.compile(r"(Z|[+-]\d{2}:?\d{2})\s*$")
@@ -157,7 +209,8 @@ def read_workbook(path: Path) -> dict:
             if rows:
                 sheets[ws.title] = pd.DataFrame(rows, index=range(1, len(rows) + 1), dtype=object)
     else:
-        for name, df in pd.read_excel(path, sheet_name=None, header=None, dtype=object).items():
+        # keep_default_na=False: a literal "NA" (e.g. a region code) must reach clean_cell, which owns the placeholder policy
+        for name, df in pd.read_excel(path, sheet_name=None, header=None, dtype=object, keep_default_na=False).items():
             df = df.astype(object)
             df.index = range(1, len(df) + 1)
             sheets[name] = df
@@ -181,16 +234,24 @@ def clean_sheet(name: str, raw: pd.DataFrame, opts) -> dict | None:
     window = nn[nn > 0].iloc[:20]
     thr = max(1, math.ceil(0.6 * window.max()))
     header_idx = window.index[int((window.values >= thr).argmax())]
-    if opts.header_row:
-        if opts.header_row in nn.index and nn.loc[opts.header_row] > 0:
-            header_idx = opts.header_row
+    explicit = header_row_for(name, opts.header_row)
+    confirmed = False
+    if explicit:
+        if explicit in nn.index and nn.loc[explicit] > 0:
+            header_idx, confirmed = explicit, True
         else:
-            warns.append(f"[{name}] --header-row {opts.header_row} is empty or outside the sheet - header was auto-detected instead.")
+            warns.append(f"[{name}] header row {explicit} is empty or outside the sheet - header was auto-detected instead.")
     above_idx = list(nn.index[(nn.index < header_idx) & (nn > 0)])
+    multi_above = [i for i in above_idx if nn.loc[i] >= 2]
+    if multi_above and not confirmed:
+        # a multi-cell row above the detected header could itself be a header with empty cells (or the detected
+        # "header" could be a data row), so guessing could mislabel every column - stop and ask instead
+        raise HeaderReviewNeeded(
+            f"[{name}] cannot tell which row is the header. Row {header_idx} looks like the header, but row(s) "
+            f"{', '.join(map(str, multi_above))} above it also hold several values. Nothing was changed for this sheet. "
+            f'Confirm the header row N and re-run with --header-row "{name}=N".'
+        )
     note("(sheet)", "Moved title/note rows above the header to the Rejected sheet", len(above_idx))
-    if any(nn.loc[i] >= 2 for i in above_idx):  # a multi-cell row could be a sparse header, not a title
-        warns.append(f"[{name}] header was taken from row {header_idx}; row(s) {', '.join(map(str, above_idx))} above it "
-                     "were moved to the Rejected sheet. If the real header is higher up, re-run with --header-row N.")
 
     names, auto = [], []
     for j, v in enumerate(cleaned.loc[header_idx]):
@@ -279,9 +340,11 @@ def clean_sheet(name: str, raw: pd.DataFrame, opts) -> dict | None:
         # and real Excel dates are never identifiers, so those go through date/number validation instead
         mostly_dates = sum(isinstance(v, (datetime, date, pd.Timestamp)) for v in nonnull) >= 0.5 * len(nonnull)
         id_like = (
-            bool(ID_NAME_RE.search(col)) and not DATE_NAME_RE.search(col) and not QTY_NAME_RE.search(col) and not mostly_dates
+            bool(ID_NAME_RE.search(col)) and not is_date_name(col) and not is_qty_name(col) and not mostly_dates
         ) or any(isinstance(v, str) and len(v) > 1 and v[0] == "0" and v.isdigit() for v in nonnull)
-        is_email = "email" in col.casefold().replace("-", "")
+        is_email = is_email_name(col) and any(isinstance(v, str) and "@" in v for v in nonnull)
+        if is_email_name(col) and not is_email:
+            warns.append(f"[{name}] '{col}' looks like an email column but no value contains '@' - left unvalidated, please review.")
         # 16+ digit integers (card/account/reference numbers) lose precision as floats and could merge distinct records
         long_ints = [
             v for v in nonnull
@@ -348,7 +411,7 @@ def clean_sheet(name: str, raw: pd.DataFrame, opts) -> dict | None:
         strs = nonnull[nonnull.map(lambda v: isinstance(v, str) and len(v) >= 6 and any(ch.isdigit() for ch in v))]
         parsed_dt = parse_dates(strs, opts.dayfirst) if len(strs) else pd.Series(dtype="datetime64[ns]")
         ok_share = (int(is_dt.sum()) + int(parsed_dt.notna().sum())) / len(nonnull)
-        need = 0.5 if DATE_NAME_RE.search(col) else 0.8
+        need = 0.5 if is_date_name(col) else 0.8
         if ok_share >= need:
             out, converted, ex = {}, 0, ""
             for idx, v in nonnull.items():
@@ -592,6 +655,10 @@ def process(path: Path, out_dir: Path | None, opts, claimed: set) -> bool:
     for name, raw in sheets.items():
         try:
             res = clean_sheet(name, raw, opts)
+        except HeaderReviewNeeded as e:  # needs a human decision; the other sheets are still cleaned
+            print(f"ERROR: {e}")
+            failed = True
+            continue
         except Exception as e:  # one bad sheet must not stop the others
             print(f"ERROR: [{name}] could not be cleaned and was left out ({type(e).__name__}: {e})")
             failed = True
@@ -601,7 +668,7 @@ def process(path: Path, out_dir: Path | None, opts, claimed: set) -> bool:
         else:
             results.append(res)
     if not results:
-        print("ERROR: no sheets with data found.")
+        print("ERROR: no sheet could be cleaned (empty, or a header row needs confirming).")
         return False
 
     out_path = output_path(path, out_dir, claimed)
@@ -634,10 +701,14 @@ def main() -> int:
     ap.add_argument("--recursive", action="store_true", help="Search folders recursively")
     ap.add_argument("--key", nargs="+", metavar="COL", help="Column(s) that uniquely identify a record; later repeats are quarantined")
     ap.add_argument("--required", nargs="+", metavar="COL", help="Column(s) that must be filled; rows missing them are quarantined")
-    ap.add_argument("--header-row", type=int, metavar="N", help="Excel row number of the header (default: auto-detect); applies to every sheet")
+    ap.add_argument("--header-row", nargs="+", metavar="N|SHEET=N",
+                    help="Excel row number of the header: N for every sheet and/or SHEET=N for one sheet (default: auto-detect)")
     ap.add_argument("--min-filled", type=float, default=0.5, help="Quarantine rows with a smaller share of core fields filled (default 0.5)")
     ap.add_argument("--dayfirst", action="store_true", help="Read ambiguous dates as DD/MM/YYYY (default MM/DD/YYYY)")
     opts = ap.parse_args()
+    for spec in opts.header_row or []:
+        if not spec.rsplit("=", 1)[-1].strip().isdigit():
+            ap.error(f"--header-row expects N or SHEET=N with N a row number, got '{spec}'")
 
     files = find_files(opts.paths, opts.recursive)
     if not files:
